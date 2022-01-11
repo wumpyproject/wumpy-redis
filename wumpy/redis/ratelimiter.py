@@ -6,15 +6,53 @@ from wumpy.rest import Route
 class RedisLock:
     """Lock for"""
 
-    def __init__(self, conn: 'RedisLimiter', route: Route) -> None:
-        self.conn = conn
+    def __init__(self, limiter: 'RedisLimiter', route: Route) -> None:
+        self.limiter = limiter
         self.route = route
 
     async def __aenter__(self) -> Callable[[Mapping[str, str]], Any]:
-        self.conn
+        self.bucket = self.limiter.command('GET', 'rl-bkts:' + self.route.endpoint)
+
+        if self.bucket is None:
+            # There are only two rare cases where this can happen:
+            # 
+            # - A cold start means Redis does not contain all buckets
+            # - This endpoint has no ratelimit (only global applies)
+            #
+            # Either way, our best bet is to leave it untracked, if this is a
+            # cold start Redis will be updated once we receive the response.
+            return self.update
+
+        lock_held = '0'
+        while lock_held == '0':
+            try:
+                await self.limiter.command('BLPOP', 'rl-bkts:GLOBAL')
+            except RedisException:
+                pass
+
+            try:
+                lock_held = await self.limiter.command('BLPOP', self.bucket + self.route.major_params)
+            except RedisException:
+                await self.limiter.command('LPUSH', self.bucket + self.route.major_params, '1')
+
+        await self.limiter.command('EXPIRE', self.bucket + self.route.major_params, self.limiter.ttl)
+
+        return self.update
 
     async def __aexit__(self) -> bool:
-        ...
+        lock = await self.limiter.command('GET', self.bucket + self.route.major_params)
+
+        if len(lock) == 0:
+            await self.limiter.command('LPUSH', self.bucket + self.route.major_params, True)
+
+
+    async def update(self, headers: Mapping[str, str]) -> None:
+        try:
+            bucket = headers['X-RateLimit-Bucket']
+        except KeyError:
+            pass
+        else:
+            await self.limiter.command('SET', 'rlbs:' + self.route.endpoint, bucket)
 
 
 class RedisLimiter:
@@ -61,11 +99,20 @@ class RedisLimiter:
        held even though the task that acquired it has died.
     """
 
-    def __init__(self, url: str, ttl: Optional[int] = None) -> None:
+    def __init__(self, url: str, ttl: int = 30) -> None:
         self._conn = ...
+
+        self.ttl = ttl
 
     async def __aenter__(self) -> Callable[[Route], AsyncContextManager[]]:
         ...
 
     async def __aexit__(self) -> bool:
         ...
+
+    async def command(self, *args) -> Any:
+        await self._conn.send(*args)
+        return await self._conn.receive()
+
+    def get(self, route: Route) -> RedisLock:
+        return RedisLock(self, route)
