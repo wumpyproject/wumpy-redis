@@ -1,4 +1,4 @@
-from ._impl import RedisConnection
+from .impl.conn import RedisConnection
 
 
 class RedisGateway:

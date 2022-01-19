@@ -2,7 +2,7 @@ from typing import Optional
 
 from typing_extensions import Self, TypeAlias
 
-from .._impl import RedisConnection
+from ..impl.conn import RedisConnection
 
 __all__ = ('RedisCacheBase',)
 

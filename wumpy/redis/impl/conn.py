@@ -6,87 +6,12 @@ import anyio
 import anyio.streams.tls
 from typing_extensions import Self
 
+from .resp import SERIALIZABLE, serialize, deserialize
+
+__all__ = ('RedisConnection',)
+
 
 REDIS_PORT = 6379
-
-SERIALIZABLE = Union[int, str, bytes, Iterable['SERIALIZABLE']]
-
-
-def serialize(*args: SERIALIZABLE, buffer: Optional[bytearray] = None) -> bytes:
-    """Serialize the arguments with RESP.
-
-    This method only supports serializing an array, as that is the
-    representation that commands take. There is no point in serializing
-    anything else on its own.
-
-    Because you can have nested arrays this method is implemented
-    recursively - therefore it is up to you to ensure that you pass no
-    cyclic iterable, otherwise RecursionError will be raised.
-
-    Parameters:
-        args: The arguments to serialize.
-        buffer:
-            The buffer to use, used when recurring but can be passed if you
-            already have a buffer to use.
-
-    Returns:
-        The bytes representation of `args`.
-    """
-
-    buffer = buffer or bytearray()
-
-    buffer += b'*%d\r\n' % len(args)
-
-    for obj in args:
-        if obj is None:
-            buffer += b'$-1\r\n'
-        elif isinstance(obj, str):
-            buffer += b'+%s\r\n' % obj
-        elif isinstance(obj, (int, bool)):
-            buffer += b':%d\r\n' % obj
-        elif isinstance(obj, bytes):
-            buffer += b'$%d\r\n%s\r\n' % (len(obj), obj)
-        else:
-            serialize(*obj, buffer=buffer)
-
-    return buffer
-
-
-def _value(buffer: bytearray):
-    l = buffer.index(b'\r\n')
-
-    # Skip the type prefix, as well as the termination characters
-    data = buffer[1:l-1]
-    del buffer[:l + 2]  # len(b'\r\n')
-
-    return data
-
-
-SERIALIZE_TYPES = {
-    ord('+'): str,
-    ord(':'): int,
-    ord('$'): lambda d: d if d != b'-1' else None,
-    ord('*'): lambda d: [SERIALIZE_TYPES[d[0]](_value(d)) for _ in range(int(d))]
-}
-
-
-def deserialize(buffer: bytearray) -> Any:
-    """Recursively deserialize a buffer.
-
-    The data will be consumed from the buffer, leaving any unused data left.
-
-    Parameters:
-        buffer: The bytearray buffer of data.
-
-    Returns:
-        The deserialized data.
-    """
-    if buffer[0] == ord('*'):
-        items = SERIALIZE_TYPES[ord(':')](_value(buffer))
-
-        return [deserialize(buffer) for _ in range(items)]
-
-    return SERIALIZE_TYPES[buffer[0]](_value(buffer))
 
 
 class RedisConnection:
@@ -112,7 +37,11 @@ class RedisConnection:
         )
 
         if self.auth is not None:
-            await self._sock.send(serialize('AUTH', *self.auth))
+            try:
+                await self._sock.send(serialize('AUTH', *self.auth))
+            except:
+                await self.__aexit__()
+                raise
 
         return self
 
