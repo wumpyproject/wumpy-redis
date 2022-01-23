@@ -6,7 +6,7 @@ import anyio
 import anyio.streams.tls
 from typing_extensions import Self
 
-from .resp import SERIALIZABLE, serialize, deserialize
+from .resp import SERIALIZABLE, send_data, receive_data
 
 __all__ = ('RedisConnection',)
 
