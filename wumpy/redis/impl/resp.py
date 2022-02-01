@@ -3,7 +3,7 @@ from typing import Any, Iterable, Union
 import anyio.abc
 from anyio.streams.buffered import BufferedByteReceiveStream
 
-__all__ = ('send_data', 'receive_data')
+__all__ = ('serialize_data', 'send_data', 'receive_data')
 
 
 SERIALIZABLE = Union[None, int, str, bytes, Iterable['SERIALIZABLE']]
@@ -15,7 +15,7 @@ class RedisException(Exception):
     pass
 
 
-def _serialize_data(*args, buffer: bytearray) -> None:
+def serialize_data(*args, buffer: bytearray) -> None:
     buffer += b'*%d\r\n' % len(args)
 
     for obj in args:
@@ -28,7 +28,7 @@ def _serialize_data(*args, buffer: bytearray) -> None:
         elif isinstance(obj, bytes):
             buffer += b'$%d\r\n%s\r\n' % (len(obj), obj)
         else:
-            _serialize_data(*obj, buffer=buffer)
+            serialize_data(*obj, buffer=buffer)
 
 
 async def send_data(
