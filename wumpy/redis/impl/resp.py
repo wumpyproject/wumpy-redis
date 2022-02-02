@@ -58,7 +58,7 @@ async def send_data(
 
     buffer = bytearray()
 
-    _serialize_data(*args, buffer=buffer)
+    serialize_data(*args, buffer=buffer)
 
     return await socket.send(buffer)
 
