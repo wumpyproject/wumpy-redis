@@ -21,12 +21,10 @@ def serialize_data(*args, buffer: bytearray) -> None:
     for obj in args:
         if obj is None:
             buffer += b'$-1\r\n'
-        elif isinstance(obj, str):
-            buffer += b'+%s\r\n' % obj.encode('utf-8')
+        elif isinstance(obj, (str, bytes)):
+            buffer += b'$%d\r\n%s\r\n' % (len(obj), obj)
         elif isinstance(obj, (int, bool)):
             buffer += b':%d\r\n' % obj
-        elif isinstance(obj, bytes):
-            buffer += b'$%d\r\n%s\r\n' % (len(obj), obj)
         else:
             serialize_data(*obj, buffer=buffer)
 
@@ -60,6 +58,7 @@ async def send_data(
 
     serialize_data(*args, buffer=buffer)
 
+    print('sending', buffer)
     return await socket.send(buffer)
 
 

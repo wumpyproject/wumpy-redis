@@ -1,5 +1,7 @@
+import sys
 from abc import ABC, abstractmethod
-from typing import Any, Iterable, List, Sequence, Tuple, Union
+from typing import Any, Iterable, List, Sequence, Tuple, Union, Type, Optional
+from types import TracebackType
 
 import anyio
 import anyio.abc
@@ -59,31 +61,38 @@ class RedisConnection(ABC):
     tls: bool
     auth: Union[Tuple[str], Tuple[str, str], None]
 
-    __slots__ = ('_conn', 'url', 'tls', 'auth')
+    __slots__ = ('_conn', 'url', 'port', 'tls', 'auth')
 
     def __init__(
         self,
         url: str,
         *,
+        port: int = REDIS_PORT,
         tls: bool = True,
         auth: Union[str, Tuple[str], Tuple[str, str], None] = None
     ) -> None:
         self._conn = None
 
         self.url = url
+        self.port = port
         self.tls = tls
-        self.auth = (auth,) if isinstance(auth, str) else auth
+        self.auth = (auth,) if isinstance(auth, (str, bytes)) else auth
 
     async def __aenter__(self) -> Self:
         try:
             await self.reconnect()
         except:
-            await self.__aexit__()
+            await self.__aexit__(*sys.exc_info())
             raise
 
         return self
 
-    async def __aexit__(self) -> None:
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType]
+    ) -> None:
         if self._conn is not None:
             await self._conn.aclose()
 
@@ -97,11 +106,11 @@ class RedisConnection(ABC):
                 self._conn = None
 
         self._conn = ConnectionPair(await anyio.connect_tcp(
-            self.url, REDIS_PORT, tls=self.tls
+            self.url, self.port, tls=self.tls
         ))
 
         if self.auth is not None:
-            await self.command('AUTH', *self.auth)
+            await self.command(b'AUTH', *self.auth)
 
     @abstractmethod
     async def command(self, *args: SERIALIZABLE) -> Any:
