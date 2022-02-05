@@ -22,11 +22,11 @@ def serialize_data(*args, buffer: bytearray) -> None:
         if obj is None:
             buffer += b'$-1\r\n'
         elif isinstance(obj, str):
-            buffer += b'+%s\r\n' % obj.encode('utf-8')
-        elif isinstance(obj, (int, bool)):
-            buffer += b':%d\r\n' % obj
+            buffer += b'$%d\r\n%s\r\n' % (len(obj), obj.encode('utf-8'))
         elif isinstance(obj, bytes):
             buffer += b'$%d\r\n%s\r\n' % (len(obj), obj)
+        elif isinstance(obj, (int, bool)):
+            buffer += b':%d\r\n' % obj
         else:
             serialize_data(*obj, buffer=buffer)
 

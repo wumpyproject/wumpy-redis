@@ -20,19 +20,13 @@ class TestSendData:
         return m.send.call_args.args[0]
 
     @pytest.mark.anyio
-    async def test_simple_ok(self) -> None:
-        assert await self.serialize('OK') == b'*1\r\n+OK\r\n'
+    async def test_string_ok(self) -> None:
+        assert await self.serialize('OK') == b'*1\r\n$2\r\nOK\r\n'
 
     @pytest.mark.anyio
-    async def test_simple_string(self) -> None:
-        # Base64 is a binary-safe format which leads to a pretty good test-case
-        # considering the encoded string will use a complicated combination of
-        # 64 different characters in the test.
-        s = '❤️ Thanks for taking the time to understand/read these tests 🙌'.encode('utf-8')
-        assert (
-            await self.serialize(base64.b64encode(s).decode('utf-8'))
-            == b'*1\r\n+%s\r\n' % base64.b64encode(s)
-        )
+    async def test_string(self) -> None:
+        s = '❤️ Thanks for taking the time to understand/read these tests 🙌'
+        assert await self.serialize(s) == b'*1\r\n$62\r\n%s\r\n' % s.encode('utf-8')
 
     @pytest.mark.anyio
     async def test_integer(self) -> None:
@@ -77,7 +71,7 @@ class TestSendData:
 
     @pytest.mark.anyio
     async def test_nested_array(self) -> None:
-        assert await self.serialize(True, [['OK']]) == b'*2\r\n:1\r\n*1\r\n*1\r\n+OK\r\n'
+        assert await self.serialize(True, [['OK']]) == b'*2\r\n:1\r\n*1\r\n*1\r\n$2\r\nOK\r\n'
 
     @pytest.mark.anyio
     async def test_array_bulk_string(self) -> None:
