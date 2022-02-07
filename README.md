@@ -15,6 +15,8 @@ The subpackage (will) contain the following utilities:
     `wumpy-client`, using Redis as a pub-sub. This makes rolling out updates
     easier, as you are no longer confined to the IDENTIFY limit.
 
-- `RedisIdentifyLock`:
+    The way it works is by
+
+- `RedisIdentifyLocker`:
     A lock-keeper for `wumpy-gateway` that uses Redis to ensure the ratelimit
     on the IDENTIFY command is respected.
