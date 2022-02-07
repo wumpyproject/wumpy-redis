@@ -1,5 +1,7 @@
+import sys
 from abc import ABC, abstractmethod
-from typing import Any, Iterable, List, Sequence, Tuple, Union
+from types import TracebackType
+from typing import Any, Iterable, List, Optional, Sequence, Tuple, Type, Union
 
 import anyio
 import anyio.abc
@@ -44,7 +46,11 @@ class ConnectionPair:
 
         return self._receive
 
+    def close(self) -> None:
+        self._closed = True
+
     async def aclose(self) -> None:
+        self._closed = True
         return await self._send.aclose()
 
 
@@ -59,51 +65,85 @@ class RedisConnection(ABC):
     tls: bool
     auth: Union[Tuple[str], Tuple[str, str], None]
 
-    __slots__ = ('_conn', 'url', 'tls', 'auth')
+    __slots__ = ('_conn', 'url', 'port', 'tls', 'auth')
 
     def __init__(
         self,
         url: str,
         *,
+        port: int = REDIS_PORT,
         tls: bool = True,
         auth: Union[str, Tuple[str], Tuple[str, str], None] = None
     ) -> None:
         self._conn = None
 
         self.url = url
+        self.port = port
         self.tls = tls
-        self.auth = (auth,) if isinstance(auth, str) else auth
+        self.auth = (auth,) if isinstance(auth, (str, bytes)) else auth
 
     async def __aenter__(self) -> Self:
         try:
             await self.reconnect()
         except:
-            await self.__aexit__()
+            await self.__aexit__(*sys.exc_info())
             raise
 
         return self
 
-    async def __aexit__(self) -> None:
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType]
+    ) -> None:
         if self._conn is not None:
             await self._conn.aclose()
 
     async def reconnect(self) -> None:
-        if self._conn is not None:
+        attempt = 0
+        while True:
+            # Usually you would have 1 + attempt * 2 but we want to reconnect
+            # immediately on the first attempt.
+            await anyio.sleep(attempt * 2)
+            attempt += 1
+
+            if self._conn is not None:
+                try:
+                    await self._conn.aclose()
+                finally:
+                    # Even if aclose() gets cancelled it'll forcefully disconnect
+                    # meaning that the socket has closed either way
+                    self._conn = None
+
             try:
-                await self._conn.aclose()
-            finally:
-                # Even if aclose() gets cancelled it'll forcefully disconnect
-                # meaning that the socket has closed either way
-                self._conn = None
+                self._conn = ConnectionPair(await anyio.connect_tcp(
+                    self.url, self.port, tls=self.tls
+                ))
+            except OSError:
+                continue
 
-        self._conn = ConnectionPair(await anyio.connect_tcp(
-            self.url, REDIS_PORT, tls=self.tls
-        ))
+            if self.auth is not None:
+                try:
+                    await send_data(self._conn.send, 'AUTH', *self.auth)
+                    # We don't use the response, but Redis sends it so we have
+                    # to receive it.
+                    await receive_data(self._conn.receive)
+                except (anyio.EndOfStream, anyio.IncompleteRead):
+                    continue
+                except (ValueError, anyio.DelimiterNotFound):
+                    continue
+                except anyio.get_cancelled_exc_class():
+                    # Cleanup the socket since it has been left in an
+                    # inconsistent state
+                    try:
+                        await self._conn.aclose()
+                    finally:
+                        self._conn = None
+                    raise
 
-        if self.auth is not None:
-            await self.command('AUTH', *self.auth)
+            break
 
-    @abstractmethod
     async def command(self, *args: SERIALIZABLE) -> Any:
         """Send a command to the Redis server.
 
@@ -329,13 +369,19 @@ class DualLockedRedisConnection(RedisConnection):
                     except (anyio.EndOfStream, anyio.IncompleteRead):
                         # The stream was closed before a complete response was
                         # received, best to just reconnect and try again.
-                        await self.reconnect()
+                        # First close the connection and cause all tasks to
+                        # immediately retry (letting us skip the queue).
+                        self._conn.close()
+                        async with self._send_lock:
+                            await self.reconnect()
                         continue
                     except (ValueError, anyio.DelimiterNotFound):
                         # Redis didn't respond with a valid RESP response.
                         # Something must be wrong with Redis so we should
                         # reconnect and try again.
-                        await self.reconnect()
+                        self._conn.close()
+                        async with self._send_lock:
+                            await self.reconnect()
                         continue
             except anyio.get_cancelled_exc_class():
                 # If we get cancelled waiting for a response then it will be
