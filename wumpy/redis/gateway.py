@@ -1,10 +1,23 @@
+from contextlib import asynccontextmanager
 import json
-from typing import Dict, Any, Optional, Type, Union, Mapping
+import sys
+from typing import AsyncGenerator, Any, Optional, Type, Union, Mapping
 from types import TracebackType
 
 from typing_extensions import Self
 
-from .impl.conn import RedisConnection
+from .impl import RedisConnection, RedlockManager
+
+
+try:
+    from wumpy.gateway import DefaultGatewayLimiter  # type: ignore
+except ImportError:
+    class DefaultGatewayLimiter:
+        def __init__(self, *args, **kwargs) -> None:
+            raise ImportError(
+                "wumpy-gateway is a required dependency to use 'RedisMaxConcurrencyLimiter'"
+            )
+
 
 __all__ = ('RedisGateway',)
 
@@ -102,3 +115,66 @@ class RedisGateway:
             The decoded payload that should be returned to the user.
         """
         return json.loads(data)
+
+
+class RedisMaxConcurrencyLimiter(DefaultGatewayLimiter):
+    """Redis gateway limiter following max concurrency.
+
+    Parameters:
+        manager:
+            An instance of `RedlockManager`, `timeout` has to be set to more
+            than 5 seconds. This will be used to acquire a lock and then let it
+            expire automatically.
+        key:
+            The key to format and use for the redlock. This has to have one
+            `{}` that gets formatted with the bucket according to
+            `shard_id % max_concurrency` from the gateway.
+    """
+    def __init__(
+        self,
+        manager: RedlockManager,
+        *,
+        key: str = 'wumpy:gateway:max-concurrency:{}',
+    ) -> None:
+        super().__init__()
+
+        if manager.timeout < 5000:
+            raise ValueError(
+                'RelockManager has to be configured with a timeout equal to, '
+                'or greater than 5 seconds'
+            )
+
+        self._locks = manager
+
+        self.key = key
+
+    def __call__(self, bucket: int) -> Self:
+        self.key = self.key.format(bucket)
+        return self
+
+    async def __aenter__(self) -> Self:
+        await self._locks.__aenter__()
+        try:
+            return await super().__aenter__()
+        except:
+            await self._locks.__aexit__(*sys.exc_info())
+            raise
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType]
+    ) -> None:
+        await self._locks.__aexit__(exc_type, exc_val, exc_tb)
+
+    @asynccontextmanager
+    async def acquire(self, opcode: int) -> AsyncGenerator[None, None]:
+        if opcode == 2:
+            # This will acquire the lock for 'timeout' amount of time, which
+            # should be at least 5 seconds. We don't release the lock because
+            # that would require creating a task for it or similar.
+            await self._locks.acquire(self.key)
+
+        async with super().acquire(opcode):
+            yield

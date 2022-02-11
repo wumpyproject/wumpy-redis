@@ -2,7 +2,7 @@ import secrets
 import sys
 import time
 from types import TracebackType
-from typing import Optional, Type
+from typing import Any, Optional, Type, Generator
 
 import anyio
 import anyio.lowlevel
@@ -85,6 +85,9 @@ class Redlock:
         self.timeout = timeout
         self.delay = delay
         self.retries = retries
+
+    def __await__(self) -> Generator[Any, Any, Self]:
+        return self.acquire.__await__()
 
     async def __aenter__(self) -> Self:
         await self.acquire()
