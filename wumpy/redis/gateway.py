@@ -1,13 +1,12 @@
-from contextlib import asynccontextmanager
 import json
 import sys
-from typing import AsyncGenerator, Any, Optional, Type, Union, Mapping
+from contextlib import asynccontextmanager
 from types import TracebackType
+from typing import Any, AsyncGenerator, Mapping, Optional, Type, Union
 
 from typing_extensions import Self
 
 from .impl import RedisConnection, RedlockManager
-
 
 try:
     from wumpy.gateway import DefaultGatewayLimiter  # type: ignore

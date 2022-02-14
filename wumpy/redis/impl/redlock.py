@@ -2,7 +2,7 @@ import secrets
 import sys
 import time
 from types import TracebackType
-from typing import Any, Optional, Type, Generator
+from typing import Any, Generator, Optional, Type
 
 import anyio
 import anyio.lowlevel
