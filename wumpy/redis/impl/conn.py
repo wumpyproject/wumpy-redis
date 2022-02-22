@@ -1,3 +1,4 @@
+from collections import deque
 import sys
 from abc import ABC, abstractmethod
 from types import TracebackType
@@ -144,6 +145,7 @@ class RedisConnection(ABC):
 
             break
 
+    @abstractmethod
     async def command(self, *args: SERIALIZABLE) -> Any:
         """Send a command to the Redis server.
 
@@ -189,12 +191,17 @@ class QueuedRedisConnection(RedisConnection):
     it gets queued up unnecessarily.
     """
 
+    _RETRY_SENTINEL = object()
+
     __slots__ = ('_command_lock',)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self._command_lock = anyio.Lock()
+
+    async def _receive(self, sock: BufferedByteReceiveStream) -> Any:
+        return await receive_data(sock)
 
     async def command(self, *args: SERIALIZABLE) -> Any:
         """Send a command to the Redis server.
@@ -220,7 +227,168 @@ class QueuedRedisConnection(RedisConnection):
                 await send_data(conn.send, *args)
 
                 try:
-                    return await receive_data(conn.receive)
+                    data = await self._receive(conn.receive)
+                    if data is self._RETRY_SENTINEL:
+                        continue
+                    return data
+                except (anyio.EndOfStream, anyio.IncompleteRead):
+                    # The stream was closed before a complete response was
+                    # received, best to just reconnect and try again.
+                    await self.reconnect()
+                    continue
+                except (ValueError, anyio.DelimiterNotFound):
+                    # Redis didn't respond with a valid RESP response.
+                    # Something must be wrong with Redis so we should
+                    # reconnect and try again.
+                    await self.reconnect()
+                    continue
+                except anyio.get_cancelled_exc_class():
+                    # If we get cancelled waiting for a response then it will
+                    # be received by the next task which would be detrimental.
+                    # We'll need to reconnect the socket and discard the data
+                    await self.reconnect()
+                    raise
+
+    async def pipeline(self, commands: Sequence[Iterable[SERIALIZABLE]]) -> List[Any]:
+        """Pipeline multiple commands at the same time.
+
+        This is an optimization step available with Redis.
+
+        This method will retry commands until they succeed. For example if 5
+        commands are sent but Redis cuts the connection after receiving 3 that
+        means that the last two commands will be retried. Therefor your
+        commands should be as idempotent as possible.
+
+        Parameters:
+            commands:
+                A list of commands (see `command()` above) to send over the
+                connection.
+
+        Returns:
+            A list of responses to the commands.
+        """
+        data = []
+
+        while len(commands) - len(data) > 0:
+            if self._conn is None:
+                await self.reconnect()
+
+            assert self._conn is not None, 'Reconnected Redis but there is no connection'
+            conn = self._conn
+
+            buffer = bytearray()
+
+            for cmd in commands[len(data):]:
+                serialize_data(*cmd, buffer=buffer)
+
+            await conn.send.send(buffer)
+
+            try:
+                for _ in range(len(commands) - len(data)):
+                    data.append(await receive_data(conn.receive))
+            except ConnectionClosed:
+                # While a task was waiting on the lock, a previous task
+                # reconnected below. We need to retry the command.                        
+                continue
+            except (anyio.EndOfStream, anyio.IncompleteRead):
+                # The stream was closed before a complete response was
+                # received, best to just reconnect and try again.
+                await self.reconnect()
+                continue
+            except (ValueError, anyio.DelimiterNotFound):
+                # Redis didn't respond with a valid RESP response.
+                # Something must be wrong with Redis so we should
+                # reconnect and try again.
+                await self.reconnect()
+                continue
+            except anyio.get_cancelled_exc_class():
+                # If we get cancelled waiting for a response then it will be
+                # received by the next task which would be detrimental. We'll
+                # need to reconnect the socket and discard this data..
+                await self.reconnect()
+                raise
+
+        return data
+
+
+class RedisPubSubConnection(RedisConnection):
+    """"""
+
+    __slots__ = ('_lock', '_msgs')
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self._lock = anyio.Lock()
+        self._msgs = deque()
+
+    async def __anext__(self) -> str:
+        if self._msgs:
+            # We technically should have a checkpoint here because this
+            # codepath does not yield to the event loop, the downside is that
+            # it would make it very inefficient if you try to catch up by
+            # filtering out most messages since this would yield each time.
+            # The code would look like this:
+            #     msg = self._msgs.popleft()
+            #     await anyio.lowlevel.checkpoint()
+            #     return msg
+            return self._msgs.popleft()
+
+        async with self._lock:
+            if self._conn is None:
+                await self.reconnect()
+
+            assert self._conn is not None, 'Reconnected Redis but there is no connection'
+
+            while True:
+                try:
+                    data = await self._receive(self._conn.receive)
+                    if isinstance(data, list) and data[0] == 'message':
+                        self._msgs.append(data)
+                        continue
+
+                    if self._msgs:
+                        return self._msgs.popleft()
+                except (anyio.EndOfStream, anyio.IncompleteRead):
+                    # The stream was closed before a complete response was
+                    # received, best to just reconnect and try again.
+                    await self.reconnect()
+                    continue
+                except (ValueError, anyio.DelimiterNotFound):
+                    # Redis didn't respond with a valid RESP response.
+                    # Something must be wrong with Redis so we should
+                    # reconnect and try again.
+                    await self.reconnect()
+                    continue
+
+    async def command(self, *args: SERIALIZABLE) -> Any:
+        """Send a command to the Redis server.
+
+        Parameters:
+            args:
+                The arguments to send to the server, should start with the
+                command as a string followed by its arguments. The only types
+                supported are strings, integers, bytes, None and an iterable of
+                the previous types.
+
+        Returns:
+            The response for the command.
+        """
+        async with self._command_lock:
+            while True:
+                if self._conn is None:
+                    await self.reconnect()
+
+                assert self._conn is not None, 'Reconnected Redis but there is no connection'
+                conn = self._conn
+
+                await send_data(conn.send, *args)
+
+                try:
+                    data = await self._receive(conn.receive)
+                    if data is self._RETRY_SENTINEL:
+                        continue
+                    return data
                 except (anyio.EndOfStream, anyio.IncompleteRead):
                     # The stream was closed before a complete response was
                     # received, best to just reconnect and try again.
