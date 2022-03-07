@@ -13,7 +13,8 @@ from typing_extensions import Self
 from .resp import SERIALIZABLE, receive_data, send_data, serialize_data
 
 __all__ = (
-    'RedisConnection', 'QueuedRedisConnection', 'DualLockedRedisConnection'
+    'REDIS_PORT', 'RedisConnection', 'QueuedRedisConnection',
+    'DualLockedRedisConnection'
 )
 
 
@@ -144,6 +145,7 @@ class RedisConnection(ABC):
 
             break
 
+    @abstractmethod
     async def command(self, *args: SERIALIZABLE) -> Any:
         """Send a command to the Redis server.
 
@@ -196,6 +198,9 @@ class QueuedRedisConnection(RedisConnection):
 
         self._command_lock = anyio.Lock()
 
+    async def _receive(self, sock: BufferedByteReceiveStream) -> Any:
+        return await receive_data(sock)
+
     async def command(self, *args: SERIALIZABLE) -> Any:
         """Send a command to the Redis server.
 
@@ -220,7 +225,7 @@ class QueuedRedisConnection(RedisConnection):
                 await send_data(conn.send, *args)
 
                 try:
-                    return await receive_data(conn.receive)
+                    return await self._receive(conn.receive)
                 except (anyio.EndOfStream, anyio.IncompleteRead):
                     # The stream was closed before a complete response was
                     # received, best to just reconnect and try again.
