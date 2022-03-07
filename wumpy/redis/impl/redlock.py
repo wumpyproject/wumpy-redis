@@ -252,13 +252,7 @@ class RedlockManager:
         self.retries = retries
 
     async def __aenter__(self) -> Self:
-        await self._conn.__aenter__()
-        try:
-            await self._load_scripts()
-        except:
-            await self._conn.__aexit__(*sys.exc_info())
-            raise
-
+        await self._load_scripts()
         return self
 
     async def __aexit__(
@@ -267,7 +261,7 @@ class RedlockManager:
         exc_val: Optional[BaseException],
         exc_tb: Optional[TracebackType]
     ) -> None:
-        await self._conn.__aexit__(exc_type, exc_val, exc_tb)
+        return
 
     async def _load_scripts(self) -> None:
         self._del_equal_hash = await self._conn.command('SCRIPT', 'LOAD', DELETE_EQUAL)
