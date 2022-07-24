@@ -65,6 +65,9 @@ class RedisGateway:
         await self._conn.__aexit__(exc_type, exc_val, exc_tb)
 
     async def __anext__(self) -> Mapping[str, Any]:
+        return await self.receive_event()
+
+    async def receive_event(self) -> Mapping[str, Any]:
         data = await self._conn.command('BLPOP', self.key, '0')
         if len(data) == 2:
             return self.decode(data[1])
@@ -124,15 +127,19 @@ class RedisMaxConcurrencyLimiter(DefaultGatewayLimiter):
             An instance of `RedlockManager`, `timeout` has to be set to more
             than 5 seconds. This will be used to acquire a lock and then let it
             expire automatically.
+        bucket:
+            Max concurrency bucket of the current connection. This is
+            calculated by `shard_id % max_concurrency` - defaults to 0 because
+            the majority of bots have `max_concurrency == 1`.
         key:
             The key to format and use for the redlock. This has to have one
-            `{}` that gets formatted with the bucket according to
-            `shard_id % max_concurrency` from the gateway.
+            `{}` that gets formatted with the `bucket` parameter.
     """
     def __init__(
         self,
         manager: RedlockManager,
         *,
+        bucket: int = 0,
         key: str = 'wumpy:gateway:max-concurrency:{}',
     ) -> None:
         super().__init__()
@@ -145,11 +152,18 @@ class RedisMaxConcurrencyLimiter(DefaultGatewayLimiter):
 
         self._locks = manager
 
-        self.key = key
+        self.key = key.format(bucket)
 
-    def __call__(self, bucket: int) -> Self:
-        self.key = self.key.format(bucket)
-        return self
+    @asynccontextmanager
+    async def __call__(self, opcode: int) -> AsyncGenerator[None, None]:
+        if opcode == 2:
+            # This will acquire the lock for 'timeout' amount of time, which
+            # should be at least 5 seconds. We don't release the lock because
+            # that would require creating a task for it or similar.
+            await self._locks.acquire(self.key)
+
+        async with super().__call__(opcode):
+            yield
 
     async def __aenter__(self) -> Self:
         await self._locks.__aenter__()
@@ -166,14 +180,3 @@ class RedisMaxConcurrencyLimiter(DefaultGatewayLimiter):
         exc_tb: Optional[TracebackType]
     ) -> None:
         await self._locks.__aexit__(exc_type, exc_val, exc_tb)
-
-    @asynccontextmanager
-    async def acquire(self, opcode: int) -> AsyncGenerator[None, None]:
-        if opcode == 2:
-            # This will acquire the lock for 'timeout' amount of time, which
-            # should be at least 5 seconds. We don't release the lock because
-            # that would require creating a task for it or similar.
-            await self._locks.acquire(self.key)
-
-        async with super().acquire(opcode):
-            yield

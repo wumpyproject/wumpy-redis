@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from types import TracebackType
 from typing import (
-    AsyncContextManager, Awaitable, Callable, Mapping, NoReturn, Optional,
+    AsyncContextManager, AsyncGenerator, Awaitable, Callable, Mapping, NoReturn, Optional,
     Tuple, Type, Union
 )
 
@@ -141,7 +141,7 @@ class RedisRatelimiter:
             await self._stack.__aexit__(*sys.exc_info())
             raise
 
-        return self.get
+        return self
 
     async def __aexit__(
         self,
@@ -151,6 +151,13 @@ class RedisRatelimiter:
     ) -> None:
         self._tasks.cancel_scope.cancel()
         await self._stack.__aexit__(exc_type, exc_val, exc_tb)
+
+    @asynccontextmanager
+    async def __call__(self, route: Route) -> AsyncGenerator[
+        Callable[[Mapping[str, str]], Awaitable[object]], None 
+    ]:
+        async with RedisRatelimiterLock(self, route).acquire() as update:
+            yield update
 
     async def _consume_pubsub(self) -> NoReturn:  # type: ignore
         async for message in self._pubsub:
@@ -175,11 +182,6 @@ class RedisRatelimiter:
 
     async def update_bucket(self, route: Route, bucket: str) -> None:
         await self._conn.command('SET', 'wumpy:rl-buckets:' + route.endpoint, bucket)
-
-    def get(self, route: Route) -> AsyncContextManager[
-        Callable[[Mapping[str, str]], Awaitable[object]]
-    ]:
-        return RedisRatelimiterLock(self, route).acquire()
 
     def get_redlock(self, key: str) -> Redlock:
         return self._locks.acquire(key)
